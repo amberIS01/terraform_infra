@@ -1,0 +1,202 @@
+module "vpc" {
+  source  = "terraform-aws-modules/vpc/aws"
+  version = "5.16.0"
+
+  name = "vpc-region1"
+
+  cidr = "10.10.0.0/16"
+  azs  = slice(data.aws_availability_zones.available.names, 0, 2)
+
+  public_subnets  = ["10.10.0.0/24", "10.10.3.0/24"]
+  private_subnets = ["10.10.1.0/24", "10.10.4.0/24", "10.10.2.0/24", "10.10.5.0/24"]
+
+  enable_nat_gateway   = true
+  single_nat_gateway   = false
+  one_nat_gateway_per_az = true
+  enable_dns_hostnames = true
+  
+  create_igw = true
+
+}
+
+module "vpc" {
+  source  = "terraform-aws-modules/vpc/aws"
+  version = "5.16.0"
+
+  name = "vpc-region2"
+
+  cidr = "10.20.0.0/16"
+  azs  = slice(data.aws_availability_zones.available.names, 0, 2)
+
+  public_subnets  = ["10.20.0.0/24", "10.20.3.0/24"]
+  private_subnets = ["10.20.1.0/24", "10.20.4.0/24", "10.20.2.0/24", "10.20.5.0/24"]
+
+  enable_nat_gateway   = true
+  single_nat_gateway   = false
+  one_nat_gateway_per_az = true
+  enable_dns_hostnames = true
+  
+  create_igw = true
+
+}
+
+
+locals {
+  vpc_config = {
+    region1 = {
+      cidr            = "10.10.0.0/16"
+      public_subnets  = ["10.10.0.0/24", "10.10.3.0/24"]
+      private_subnets = ["10.10.1.0/24", "10.10.4.0/24", "10.10.2.0/24", "10.10.5.0/24"]
+    }
+    region2 = {
+      cidr            = "10.20.0.0/16"
+      public_subnets  = ["10.20.0.0/24", "10.20.3.0/24"]
+      private_subnets = ["10.20.1.0/24", "10.20.4.0/24", "10.20.2.0/24", "10.20.5.0/24"]
+    }
+  }
+}
+
+module "vpc" {
+
+  source  = "terraform-aws-modules/vpc/aws"
+  version = "5.16.0"
+
+  for_each = local.vpc_config
+
+  providers = {
+    aws = each.key == "region1" ? aws.region1 : aws.region2
+  }
+  
+  name = "vpc-${each.key}"
+  cidr = each.value.cidr
+  azs = each.key == "region1" 
+    ? slice(data.aws_availability_zones.region1.names, 0, 2)
+    : slice(data.aws_availability_zones.region2.names, 0, 2)
+
+  public_subnets  = each.value.public_subnets
+  private_subnets = each.value.private_subnets
+
+  public_subnet_tags = {
+    Name = "public-subnet"
+  }
+
+  private_subnet_tags = {
+    for idx, subnet in each.value.private_subnets : 
+    subnet => idx < 2 ? "web" : "app"
+  
+  }
+
+  enable_nat_gateway   = true
+  single_nat_gateway   = false
+  one_nat_gateway_per_az = true
+  enable_dns_hostnames = true
+
+  create_igw = true
+
+}
+
+resource "aws_key_pair" "key" {
+  key_name   = var.keypair
+  public_key = file("project-key.pub")
+}
+
+
+
+module "ELB1" {
+  source = "terraform-aws-modules/elb/aws"
+
+  name             = var.elb_name_r1
+  subnets          = data.aws_subnets.subnets_for_elb_r1.ids
+  security_groups  = [aws_security_group.sg_for_all_r1.id]
+  internal         = false
+
+  listener = [
+    {
+      instance_port     = 80
+      instance_protocol = "HTTP"
+      lb_port           = 80
+      lb_protocol       = "HTTP"
+    }
+  ]
+
+  health_check = {
+    interval            = 30
+    healthy_threshold   = 2
+    unhealthy_threshold = 2
+    timeout             = 5
+  }
+}
+
+resource "aws_lb_target_group" "tg_r1" {
+  provider = aws.region1
+  name     = "tg-r1"
+  port     = 80
+  protocol = "HTTP"
+  vpc_id   = module.vpc1.vpc_id
+
+  health_check {
+    protocol            = "HTTP"
+    path                = "/"
+    interval            = 30
+    healthy_threshold   = 2
+    unhealthy_threshold = 2
+    timeout             = 5
+  }
+}
+
+resource "aws_lb_target_group_attachment" "tg_attachment_r1" {
+  provider = aws.region1
+  target_group_arn = aws_lb_target_group.tg_r1.arn
+  target_id        = flatten([for inst in data.aws_instances.instances_in_subnets_r1.ids : inst.id])
+  port             = 80
+}
+
+
+module "ELB2" {
+  source = "terraform-aws-modules/elb/aws"
+
+  name             = var.elb_name_r2
+  subnets          = data.aws_subnets.subnets_for_elb_r2.ids
+  security_groups  = [aws_security_group.sg_for_all_r2.id]
+  internal         = false
+
+  listener = [
+    {
+      instance_port     = 80
+      instance_protocol = "HTTP"
+      lb_port           = 80
+      lb_protocol       = "HTTP"
+    }
+  ]
+
+  health_check = {
+    interval            = 30
+    healthy_threshold   = 2
+    unhealthy_threshold = 2
+    timeout             = 5
+  }
+}
+
+resource "aws_lb_target_group" "tg_r2" {
+  provider = aws.region2
+  name     = "tg-r2"
+  port     = 80
+  protocol = "HTTP"
+  vpc_id   = module.vpc2.vpc_id
+
+  health_check {
+    protocol            = "HTTP"
+    path                = "/"
+    interval            = 30
+    healthy_threshold   = 2
+    unhealthy_threshold = 2
+    timeout             = 5
+  }
+}
+
+resource "aws_lb_target_group_attachment" "tg_attachment_r2" {
+  provider = aws.region2
+  target_group_arn = aws_lb_target_group.tg_r2.arn
+  target_id        = flatten([for inst in data.aws_instances.instances_in_subnets_r2.ids : inst.id])
+  port             = 80
+}
